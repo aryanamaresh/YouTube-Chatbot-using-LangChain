@@ -1,0 +1,125 @@
+"""
+Configuration file for YouTube Transcript RAG Pipeline
+Customize these settings for your use case
+"""
+ 
+# ============================================
+# OpenAI Configuration
+# ============================================
+ 
+# Model to use for generation
+LLM_MODEL = "gpt-4o-mini"
+ 
+# Temperature controls randomness
+# 0.0 = deterministic (most focused)
+# 0.5 = balanced
+# 1.0 = more random/creative
+LLM_TEMPERATURE = 0.2
+ 
+# Maximum tokens for response
+LLM_MAX_TOKENS = 2000
+ 
+ 
+# ============================================
+# Text Splitting Configuration
+# ============================================
+ 
+# Size of text chunks in characters
+CHUNK_SIZE = 1000
+ 
+# Overlap between chunks for context
+CHUNK_OVERLAP = 200
+ 
+ 
+# ============================================
+# Embedding Configuration
+# ============================================
+ 
+# Embedding model (from OpenAI)
+EMBEDDING_MODEL = "text-embedding-3-small"
+ 
+# Cost-effective: text-embedding-3-small
+# More powerful: text-embedding-3-large
+ 
+ 
+# ============================================
+# Retrieval Configuration
+# ============================================
+ 
+# Number of documents to retrieve
+RETRIEVE_K = 4
+ 
+# Search type: "similarity" or "mmr" (Maximal Marginal Relevance)
+SEARCH_TYPE = "similarity"
+ 
+# Threshold for relevance score (0-1)
+# Higher = more strict filtering
+RELEVANCE_THRESHOLD = 0.5
+ 
+ 
+# ============================================
+# Vector Store Configuration
+# ============================================
+ 
+# Type of vector store: "faiss" (default), "chroma", "pinecone"
+VECTOR_STORE_TYPE = "faiss"
+ 
+# Path to save/load vector store
+VECTOR_STORE_PATH = "./vector_store"
+ 
+ 
+# ============================================
+# YouTube Configuration
+# ============================================
+ 
+# Preferred languages for transcripts (in order)
+PREFERRED_LANGUAGES = ["en", "en-US"]
+ 
+# Auto-translate if preferred language not available
+AUTO_TRANSLATE = False
+ 
+ 
+# ============================================
+# Prompt Template
+# ============================================
+ 
+SYSTEM_PROMPT = """You are a helpful assistant.
+Answer ONLY from the provided transcript context.
+If the context is insufficient, say you don't know.
+Be concise and accurate."""
+ 
+CONTEXT_TEMPLATE = """Context:
+{context}
+ 
+Question: {question}"""
+ 
+ 
+# ============================================
+# Logging Configuration
+# ============================================
+ 
+# Logging level: "DEBUG", "INFO", "WARNING", "ERROR"
+LOG_LEVEL = "INFO"
+ 
+# Log file path (leave empty to disable)
+LOG_FILE = "rag_pipeline.log"
+ 
+ 
+# ============================================
+# Advanced Options
+# ============================================
+ 
+# Cache embeddings to avoid recomputation
+CACHE_EMBEDDINGS = True
+ 
+# Batch size for embedding generation
+EMBEDDING_BATCH_SIZE = 10
+ 
+# Timeout for API calls (seconds)
+API_TIMEOUT = 30
+ 
+# Retry attempts for failed API calls
+MAX_RETRIES = 3
+ 
+# Rate limiting delay between requests (seconds)
+RATE_LIMIT_DELAY = 0.1
