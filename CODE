@@ -1,618 +1,231 @@
 """
-================================================================================
-                    YOUTUBE CHATBOT USING LANGCHAIN
-                          Complete All-in-One Code
-================================================================================
-
-This is a complete YouTube Chatbot that can:
-1. Extract transcripts from YouTube videos
-2. Split them into optimal chunks
-3. Create embeddings and store in vector database
-4. Answer questions about the video content
-5. Show source references
-6. Run as CLI or Web UI (Streamlit)
-
-INSTALLATION:
-    pip install langchain langchain-openai youtube-transcript-api faiss-cpu python-dotenv
-
-SETUP:
-    1. Create .env file with: OPENAI_API_KEY=your_key_here
-    2. Get API key from: https://platform.openai.com/api-keys
-
-USAGE:
-    # CLI Version
-    python chatbot.py
-
-    # Web UI Version (Recommended)
-    pip install streamlit
-    streamlit run chatbot.py
-
-================================================================================
+YouTube Transcript RAG Pipeline
+Retrieves and answers questions about YouTube video transcripts using RAG architecture.
 """
-
+ 
 import os
-import sys
-from typing import List, Tuple, Optional
 from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
-# Check if Streamlit is available
-try:
-    import streamlit as st
-    STREAMLIT_AVAILABLE = True
-except ImportError:
-    STREAMLIT_AVAILABLE = False
-
-# LangChain imports
-from langchain.document_loaders import YoutubeLoader
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from langchain.llms import OpenAI
-
-# ============================================================================
-#                           CONFIGURATION
-# ============================================================================
-
-CONFIG = {
-    "chunk_size": 1000,
-    "chunk_overlap": 200,
-    "temperature": 0.7,
-    "model": "gpt-3.5-turbo",
-    "k_retrieval": 3,  # Number of documents to retrieve
-}
-
-# ============================================================================
-#                        CORE FUNCTIONS
-# ============================================================================
-
-def load_youtube_transcript(video_url: str) -> Optional[List]:
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
+from langchain_core.output_parsers import StrOutputParser
+ 
+ 
+# Load environment variables from .env file
+load_dotenv()
+ 
+ 
+class YouTubeTranscriptRAG:
     """
-    Extract transcript from YouTube video
+    A Retrieval Augmented Generation (RAG) system for YouTube video transcripts.
     
-    Args:
-        video_url: Full YouTube video URL
-        
-    Returns:
-        List of document objects or None if failed
+    This class handles:
+    - Fetching YouTube transcripts
+    - Splitting text into chunks
+    - Creating embeddings
+    - Building a vector store
+    - Retrieving relevant information
+    - Generating answers using LLM
     """
-    try:
-        print("📺 Loading YouTube transcript...")
-        loader = YoutubeLoader.from_youtube_url(
-            video_url, 
-            add_video_info=True
+    
+    def __init__(self, model="gpt-4o-mini", temperature=0.2):
+        """
+        Initialize the RAG system with specified LLM model.
+        
+        Args:
+            model (str): OpenAI model name. Default: "gpt-4o-mini"
+            temperature (float): LLM temperature for randomness. Default: 0.2
+        """
+        self.llm = ChatOpenAI(model=model, temperature=temperature)
+        self.vector_store = None
+        self.retriever = None
+        self.chain = None
+        self._setup_chain()
+    
+    def _setup_chain(self):
+        """Setup the RAG chain with prompt and parser."""
+        prompt = PromptTemplate(
+            template="""You are a helpful assistant.
+Answer ONLY from the provided transcript context.
+If the context is insufficient, say you don't know.
+ 
+Context:
+{context}
+ 
+Question: {question}""",
+            input_variables=['context', 'question']
         )
-        documents = loader.load()
-        print(f"✅ Successfully loaded {len(documents)} document(s)")
-        return documents
-    except Exception as e:
-        print(f"❌ Error loading video: {str(e)}")
-        return None
-
-
-def split_documents(
-    documents: List,
-    chunk_size: int = 1000,
-    chunk_overlap: int = 200
-) -> List:
-    """
-    Split documents into smaller chunks for processing
-    
-    Args:
-        documents: List of document objects
-        chunk_size: Size of each chunk in characters
-        chunk_overlap: Overlap between chunks
         
-    Returns:
-        List of document chunks
-    """
-    try:
-        print("✂️ Splitting documents into chunks...")
-        text_splitter = RecursiveCharacterTextSplitter(
+        def format_docs(retrieved_docs):
+            """Format retrieved documents into context text."""
+            return "\n\n".join(doc.page_content for doc in retrieved_docs)
+        
+        # Build the chain
+        parallel_chain = RunnableParallel({
+            'context': self.retriever | RunnableLambda(format_docs) if self.retriever else RunnablePassthrough(),
+            'question': RunnablePassthrough()
+        })
+        
+        parser = StrOutputParser()
+        self.chain = parallel_chain | prompt | self.llm | parser
+    
+    def ingest_transcript(self, video_id, languages=["en"]):
+        """
+        Step 1a: Fetch and ingest YouTube transcript.
+        
+        Args:
+            video_id (str): YouTube video ID (not full URL)
+            languages (list): Preferred languages for transcript
+            
+        Returns:
+            str: Raw transcript text
+            
+        Raises:
+            TranscriptsDisabled: If captions are disabled for video
+        """
+        try:
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id, 
+                languages=languages
+            )
+            transcript = " ".join(chunk["text"] for chunk in transcript_list)
+            print(f"✓ Successfully retrieved transcript ({len(transcript)} characters)")
+            return transcript
+            
+        except TranscriptsDisabled:
+            print("✗ Error: No captions available for this video.")
+            raise
+        except Exception as e:
+            print(f"✗ Error fetching transcript: {e}")
+            raise
+    
+    def split_text(self, transcript, chunk_size=1000, chunk_overlap=200):
+        """
+        Step 1b: Split transcript into overlapping chunks.
+        
+        Args:
+            transcript (str): Raw transcript text
+            chunk_size (int): Size of each chunk. Default: 1000
+            chunk_overlap (int): Overlap between chunks. Default: 200
+            
+        Returns:
+            list: List of document chunks
+        """
+        splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=["\n\n", "\n", " ", ""]
+            chunk_overlap=chunk_overlap
         )
-        chunks = text_splitter.split_documents(documents)
-        print(f"✅ Created {len(chunks)} chunks")
+        chunks = splitter.create_documents([transcript])
+        print(f"✓ Created {len(chunks)} text chunks")
         return chunks
-    except Exception as e:
-        print(f"❌ Error splitting documents: {str(e)}")
-        return None
-
-
-def create_vector_store(chunks: List):
-    """
-    Create embeddings and FAISS vector store
     
-    Args:
-        chunks: List of document chunks
+    def create_vector_store(self, chunks):
+        """
+        Step 1c & 1d: Generate embeddings and create vector store.
         
-    Returns:
-        FAISS vector store object
-    """
-    try:
-        print("🧠 Creating embeddings and vector store...")
-        embeddings = OpenAIEmbeddings()
-        vector_store = FAISS.from_documents(chunks, embeddings)
-        print("✅ Vector store created successfully")
-        return vector_store
-    except Exception as e:
-        print(f"❌ Error creating vector store: {str(e)}")
-        return None
-
-
-def create_qa_chain(vector_store, temperature: float = 0.7, model: str = "gpt-3.5-turbo"):
-    """
-    Create RetrievalQA chain for question answering
-    
-    Args:
-        vector_store: FAISS vector store
-        temperature: LLM temperature (0-1)
-        model: Model name to use
+        Args:
+            chunks (list): List of document chunks
+            
+        Returns:
+            FAISS: Vector store with embeddings
+        """
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        self.vector_store = FAISS.from_documents(chunks, embeddings)
+        print(f"✓ Created FAISS vector store with {len(chunks)} documents")
         
-    Returns:
-        RetrievalQA chain object
-    """
-    try:
-        print("🤖 Creating QA chain...")
-        llm = OpenAI(
-            temperature=temperature,
-            model=model
+        # Setup retriever
+        self.retriever = self.vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 4}
         )
         
-        qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=vector_store.as_retriever(
-                search_kwargs={"k": CONFIG["k_retrieval"]}
-            ),
-            return_source_documents=True,
-            verbose=False
-        )
-        print("✅ QA chain created successfully")
-        return qa_chain
-    except Exception as e:
-        print(f"❌ Error creating QA chain: {str(e)}")
-        return None
-
-
-def process_youtube_video(video_url: str):
-    """
-    Complete pipeline: Load video -> Split -> Embed -> Create chain
+        # Rebuild chain with retriever
+        self._setup_chain()
+        return self.vector_store
     
-    Args:
-        video_url: YouTube video URL
+    def retrieve_context(self, query, k=4):
+        """
+        Step 2: Retrieve relevant documents from vector store.
         
-    Returns:
-        QA chain object or None if failed
-    """
-    # Step 1: Load transcript
-    documents = load_youtube_transcript(video_url)
-    if not documents:
-        return None
+        Args:
+            query (str): Search query
+            k (int): Number of documents to retrieve. Default: 4
+            
+        Returns:
+            list: List of relevant documents
+        """
+        if not self.retriever:
+            raise ValueError("Vector store not initialized. Run create_vector_store first.")
+        
+        retrieved_docs = self.retriever.invoke(query)
+        print(f"✓ Retrieved {len(retrieved_docs)} relevant documents")
+        return retrieved_docs
     
-    # Step 2: Split documents
-    chunks = split_documents(
-        documents,
-        chunk_size=CONFIG["chunk_size"],
-        chunk_overlap=CONFIG["chunk_overlap"]
-    )
-    if not chunks:
-        return None
+    def answer_question(self, question):
+        """
+        Step 4: Answer question using RAG chain.
+        
+        Args:
+            question (str): User question
+            
+        Returns:
+            str: Answer based on transcript context
+        """
+        if not self.chain:
+            raise ValueError("RAG chain not initialized.")
+        
+        answer = self.chain.invoke(question)
+        return answer
+ 
+ 
+def main():
+    """Main function demonstrating the RAG pipeline."""
+    
+    print("=" * 60)
+    print("YouTube Transcript RAG Pipeline")
+    print("=" * 60)
+    
+    # Initialize RAG system
+    rag = YouTubeTranscriptRAG(model="gpt-4o-mini", temperature=0.2)
+    
+    # Step 1: Ingest transcript
+    video_id = "Gfr50f6ZBvo"  # YouTube video ID only
+    transcript = rag.ingest_transcript(video_id, languages=["en"])
+    print(f"\nFirst 200 characters: {transcript[:200]}...\n")
+    
+    # Step 2: Split text into chunks
+    chunks = rag.split_text(transcript, chunk_size=1000, chunk_overlap=200)
+    print(f"Sample chunk: {chunks[0].page_content[:200]}...\n")
     
     # Step 3: Create vector store
-    vector_store = create_vector_store(chunks)
-    if not vector_store:
-        return None
+    rag.create_vector_store(chunks)
     
-    # Step 4: Create QA chain
-    qa_chain = create_qa_chain(
-        vector_store,
-        temperature=CONFIG["temperature"],
-        model=CONFIG["model"]
-    )
+    # Step 4: Example retrieval
+    sample_query = "What is deepmind"
+    retrieved = rag.retrieve_context(sample_query, k=4)
+    print(f"\nRetrieved documents for '{sample_query}':")
+    for i, doc in enumerate(retrieved, 1):
+        print(f"Doc {i}: {doc.page_content[:100]}...\n")
     
-    return qa_chain
-
-
-# ============================================================================
-#                        CLI VERSION
-# ============================================================================
-
-def run_cli_chatbot():
-    """Run the chatbot in command-line interface mode"""
+    # Step 5: Answer questions
+    questions = [
+        "is the topic of nuclear fusion discussed in this video? if yes then what was discussed",
+        "who is Demis",
+        "Can you summarize the video"
+    ]
     
-    print("\n" + "="*70)
-    print("🎬 YOUTUBE CHATBOT - CLI VERSION")
-    print("="*70)
+    print("\n" + "=" * 60)
+    print("Answering Questions")
+    print("=" * 60)
     
-    # Get video URL
-    video_url = input("\n📺 Enter YouTube URL: ").strip()
-    
-    if not video_url:
-        print("❌ No URL provided")
-        return
-    
-    # Process video
-    print("\n⏳ Processing video...")
-    qa_chain = process_youtube_video(video_url)
-    
-    if not qa_chain:
-        print("❌ Failed to process video")
-        return
-    
-    # Chat loop
-    print("\n" + "="*70)
-    print("💬 CHATBOT READY - Start asking questions!")
-    print("Commands: 'quit' to exit, 'clear' to clear history")
-    print("="*70)
-    
-    conversation_history = []
-    
-    while True:
-        print()
-        question = input("👤 You: ").strip()
-        
-        # Handle commands
-        if question.lower() == 'quit':
-            print("\n👋 Goodbye!")
-            break
-        
-        if question.lower() == 'clear':
-            conversation_history = []
-            print("🧹 Chat history cleared")
-            continue
-        
-        if not question:
-            continue
-        
-        # Get answer
-        try:
-            print("\n🤖 Bot: Thinking...", end="\r")
-            result = qa_chain({"query": question})
-            
-            # Display answer
-            print("🤖 Bot: " + result['result'])
-            
-            # Store in history
-            conversation_history.append({
-                "question": question,
-                "answer": result['result']
-            })
-            
-            # Show sources
-            print("\n📚 Sources:")
-            for i, doc in enumerate(result["source_documents"], 1):
-                print(f"   [{i}] {doc.metadata.get('source', 'Unknown')}")
-        
-        except Exception as e:
-            print(f"\n❌ Error: {str(e)}")
-
-
-# ============================================================================
-#                        STREAMLIT WEB UI VERSION
-# ============================================================================
-
-def run_streamlit_chatbot():
-    """Run the chatbot in Streamlit web UI mode"""
-    
-    # Page configuration
-    st.set_page_config(
-        page_title="YouTube Chatbot",
-        page_icon="🎬",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Custom CSS
-    st.markdown("""
-        <style>
-        .main-title {
-            font-size: 3em;
-            color: #FF0000;
-            text-align: center;
-            margin-bottom: 1em;
-        }
-        .info-box {
-            background-color: #f0f2f6;
-            padding: 1em;
-            border-radius: 0.5em;
-            margin: 1em 0;
-        }
-        </style>
-    """, unsafe_allow_html=True)
-    
-    # Header
-    st.markdown('<h1 class="main-title">🎬 YouTube Video Chatbot</h1>', unsafe_allow_html=True)
-    st.markdown("---")
-    
-    # Initialize session state
-    if "qa_chain" not in st.session_state:
-        st.session_state.qa_chain = None
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "video_metadata" not in st.session_state:
-        st.session_state.video_metadata = None
-    
-    @st.cache_resource
-    def load_and_process_video(video_url):
-        """Load video transcript and create QA chain"""
-        try:
-            with st.spinner("🔄 Loading video transcript..."):
-                loader = YoutubeLoader.from_youtube_url(
-                    video_url,
-                    add_video_info=True
-                )
-                documents = loader.load()
-            
-            with st.spinner("✂️ Processing document chunks..."):
-                text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=CONFIG["chunk_size"],
-                    chunk_overlap=CONFIG["chunk_overlap"]
-                )
-                chunks = text_splitter.split_documents(documents)
-            
-            with st.spinner("🧠 Creating embeddings..."):
-                embeddings = OpenAIEmbeddings()
-                vector_store = FAISS.from_documents(chunks, embeddings)
-            
-            with st.spinner("🤖 Setting up QA chain..."):
-                llm = OpenAI(
-                    temperature=CONFIG["temperature"],
-                    model=CONFIG["model"]
-                )
-                qa_chain = RetrievalQA.from_chain_type(
-                    llm=llm,
-                    chain_type="stuff",
-                    retriever=vector_store.as_retriever(
-                        search_kwargs={"k": CONFIG["k_retrieval"]}
-                    ),
-                    return_source_documents=True
-                )
-            
-            return qa_chain, documents[0].metadata
-        
-        except Exception as e:
-            st.error(f"❌ Error processing video: {str(e)}")
-            return None, None
-    
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Settings")
-        
-        with st.form("video_form"):
-            video_url = st.text_input(
-                "YouTube URL:",
-                placeholder="https://www.youtube.com/watch?v=...",
-                help="Paste the full YouTube video URL"
-            )
-            
-            submit_button = st.form_submit_button(
-                "🚀 Load Video",
-                use_container_width=True
-            )
-        
-        if submit_button:
-            if not video_url:
-                st.error("❌ Please enter a YouTube URL")
-            else:
-                st.session_state.messages = []
-                qa_chain, metadata = load_and_process_video(video_url)
-                
-                if qa_chain:
-                    st.session_state.qa_chain = qa_chain
-                    st.session_state.video_metadata = metadata
-                    st.success("✅ Video loaded successfully!")
-        
-        # Display video info
-        if st.session_state.video_metadata:
-            st.divider()
-            st.subheader("📺 Video Info")
-            st.info(f"**Title:** {st.session_state.video_metadata.get('title', 'Unknown')}")
-    
-    # Main content
-    if st.session_state.qa_chain is None:
-        # Initial state
-        st.info(
-            "👈 **How to use:**\n\n"
-            "1. Enter a YouTube URL in the sidebar\n"
-            "2. Click 'Load Video' to extract the transcript\n"
-            "3. Ask questions about the video content\n\n"
-            "**Note:** Make sure the video has captions/subtitles available."
-        )
-        
-        st.divider()
-        
-        st.subheader("📌 Example Videos to Try")
-        st.markdown("""
-        - TED Talks
-        - Educational content
-        - Tutorial videos
-        - Conference talks
-        - News segments
-        """)
-    
-    else:
-        # Chat interface
-        st.subheader("💬 Chat with Video")
-        
-        # Display chat history
-        chat_container = st.container()
-        
-        with chat_container:
-            for message in st.session_state.messages:
-                if message["role"] == "user":
-                    with st.chat_message("user", avatar="👤"):
-                        st.markdown(message["content"])
-                else:
-                    with st.chat_message("assistant", avatar="🤖"):
-                        st.markdown(message["content"])
-                        if "sources" in message:
-                            with st.expander("📚 Sources"):
-                                for source in message["sources"]:
-                                    st.caption(source)
-        
-        # Chat input
-        user_input = st.chat_input(
-            "Ask a question about the video...",
-            key="chat_input"
-        )
-        
-        if user_input:
-            # Add user message to history
-            st.session_state.messages.append({
-                "role": "user",
-                "content": user_input
-            })
-            
-            # Display user message
-            with chat_container:
-                with st.chat_message("user", avatar="👤"):
-                    st.markdown(user_input)
-            
-            # Get bot response
-            with st.spinner("🤔 Thinking..."):
-                result = st.session_state.qa_chain({"query": user_input})
-                bot_response = result["result"]
-                
-                # Extract sources
-                sources = []
-                for doc in result["source_documents"]:
-                    source_text = (
-                        doc.page_content[:150] + "..." 
-                        if len(doc.page_content) > 150 
-                        else doc.page_content
-                    )
-                    sources.append(source_text)
-            
-            # Display bot response
-            with chat_container:
-                with st.chat_message("assistant", avatar="🤖"):
-                    st.markdown(bot_response)
-                    
-                    with st.expander("📚 Sources used"):
-                        for i, source in enumerate(sources, 1):
-                            st.caption(f"**[{i}]** {source}")
-            
-            # Add bot message to history
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": bot_response,
-                "sources": sources
-            })
-        
-        # Sidebar options
-        with st.sidebar:
-            st.divider()
-            st.subheader("🛠️ Options")
-            
-            if st.button("🗑️ Clear Chat History", use_container_width=True):
-                st.session_state.messages = []
-                st.rerun()
-            
-            if st.button("🔄 Load New Video", use_container_width=True):
-                st.session_state.qa_chain = None
-                st.session_state.messages = []
-                st.session_state.video_metadata = None
-                st.rerun()
-    
-    # Footer
-    st.divider()
-    st.markdown("""
-    <div style='text-align: center; color: gray; font-size: 12px;'>
-        <p>Powered by LangChain & OpenAI | YouTube transcripts © YouTube LLC</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-# ============================================================================
-#                        MAIN ENTRY POINT
-# ============================================================================
-
-def main():
-    """Main function - decides whether to run CLI or Streamlit"""
-    
-    # Check for API key
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ ERROR: OPENAI_API_KEY not found!")
-        print("\nPlease set your API key:")
-        print("  1. Create a .env file in this directory")
-        print("  2. Add: OPENAI_API_KEY=your_api_key_here")
-        print("  3. Get your key from: https://platform.openai.com/api-keys")
-        sys.exit(1)
-    
-    # Detect if running under Streamlit
-    if STREAMLIT_AVAILABLE and "streamlit" in sys.modules:
-        run_streamlit_chatbot()
-    else:
-        run_cli_chatbot()
-
-
+    for question in questions:
+        print(f"\nQ: {question}")
+        answer = rag.answer_question(question)
+        print(f"A: {answer}\n")
+ 
+ 
 if __name__ == "__main__":
     main()
-
-
-# ============================================================================
-#                        USAGE EXAMPLES
-# ============================================================================
-
-"""
-QUICK START:
-
-1. SETUP:
-   pip install langchain langchain-openai youtube-transcript-api faiss-cpu python-dotenv
-
-2. CREATE .env FILE:
-   OPENAI_API_KEY=sk-your_key_here
-
-3. RUN CLI VERSION:
-   python chatbot.py
-
-4. RUN WEB UI VERSION:
-   pip install streamlit
-   streamlit run chatbot.py
-
-5. EXAMPLE QUESTIONS:
-   - "What is this video about?"
-   - "Summarize the key points"
-   - "What are the main topics discussed?"
-   - "Tell me about [specific topic from video]"
-   - "Quote the important parts"
-
-SUPPORTED VIDEOS:
-   - Any YouTube video with captions/subtitles
-   - Educational content
-   - Tutorials
-   - Lectures
-   - Podcasts with transcripts
-   - News segments
-
-CUSTOMIZATION:
-   Edit CONFIG dictionary to change:
-   - chunk_size: Smaller = more precise, Larger = broader context
-   - temperature: Lower = more factual, Higher = more creative
-   - model: "gpt-3.5-turbo" or "gpt-4"
-   - k_retrieval: Number of sources to use (default 3)
-
-TROUBLESHOOTING:
-   Q: "No transcripts available"
-   A: Video must have captions enabled on YouTube
-
-   Q: "Invalid API key"
-   A: Check your .env file has correct OpenAI API key
-
-   Q: "Module not found"
-   A: Run: pip install -r requirements.txt
-
-   Q: "Slow processing"
-   A: Reduce chunk_size or use shorter videos
-
-COST:
-   - GPT-3.5 Turbo: ~$0.0005 per 1K tokens
-   - Embeddings: ~$0.0001 per 1K tokens
-   - Short video (5-10 min): ~$0.01-0.05
-"""
